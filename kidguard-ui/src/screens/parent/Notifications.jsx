@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import MobileFrame from '../../components/MobileFrame'
-import BottomNav from '../../components/BottomNav'
+import WebLayout from '../../components/WebLayout'
 import NotificationCard from '../../components/NotificationCard'
 import { mockNotifications } from '../../data/mock'
 
@@ -15,48 +14,82 @@ export default function Notifications() {
     : mockNotifications.filter(n => n.type === filters[activeFilter].toLowerCase())
 
   return (
-    <MobileFrame>
-      {/* Top bar */}
+    <WebLayout active="alerts">
+      {/* Page header */}
       <div style={{
         background: '#fff', borderBottom: '2px solid var(--border)',
-        padding: '0 20px', height: '56px',
+        padding: '0 32px', height: '64px', flexShrink: 0,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
-        <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '20px' }}>ALERTS</span>
-        <div style={{
-          width: '20px', height: '20px', background: 'var(--slab-red)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <span style={{ fontSize: '11px', color: '#fff', fontWeight: 700 }}>{unreadCount}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '20px' }}>ALERTS</span>
+          <div style={{
+            width: '22px', height: '22px', background: 'var(--slab-red)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <span style={{ fontSize: '11px', color: '#fff', fontWeight: 700 }}>{unreadCount}</span>
+          </div>
         </div>
+        <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+          {filtered.length} notification{filtered.length !== 1 ? 's' : ''}
+        </span>
       </div>
 
-      {/* Segmented filter */}
+      {/* Filter tabs */}
       <div style={{
-        padding: '12px 20px', borderBottom: '2px solid var(--border)',
-        display: 'flex', gap: '0',
+        padding: '0 32px', borderBottom: '2px solid var(--border)',
+        background: '#fff', flexShrink: 0,
+        display: 'flex',
       }}>
         {filters.map((f, i) => (
           <button key={f} onClick={() => setActiveFilter(i)} style={{
-            flex: 1, height: '36px',
-            background: activeFilter === i ? 'var(--slab-blue)' : 'transparent',
-            color: activeFilter === i ? '#fff' : 'var(--text-muted)',
-            border: '2px solid var(--border)',
-            borderRight: i < filters.length - 1 ? 'none' : '2px solid var(--border)',
-            fontSize: '11px', fontWeight: 600, textTransform: 'uppercase',
-            letterSpacing: '0.04em', cursor: 'pointer', fontFamily: 'var(--font-body)',
+            height: '44px', padding: '0 24px',
+            background: 'transparent',
+            color: activeFilter === i ? 'var(--slab-blue)' : 'var(--text-muted)',
+            border: 'none',
+            borderBottom: activeFilter === i ? '3px solid var(--slab-blue)' : '3px solid transparent',
+            fontSize: '12px', fontWeight: 600, textTransform: 'uppercase',
+            letterSpacing: '0.06em', cursor: 'pointer', fontFamily: 'var(--font-body)',
           }}>
             {f}
           </button>
         ))}
       </div>
 
-      {/* List */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        {filtered.map(n => <NotificationCard key={n.id} notification={n} />)}
-      </div>
+      {/* Content */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* Notifications list */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {filtered.map(n => <NotificationCard key={n.id} notification={n} />)}
+        </div>
 
-      <BottomNav active="alerts" />
-    </MobileFrame>
+        {/* Right summary panel */}
+        <div style={{
+          width: '260px', flexShrink: 0,
+          borderLeft: '2px solid var(--border)',
+          background: '#fff', padding: '24px',
+          display: 'flex', flexDirection: 'column', gap: '16px',
+        }}>
+          <div style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.06em', fontFamily: 'var(--font-body)' }}>
+            OVERVIEW
+          </div>
+          {[
+            { label: 'UNREAD', value: unreadCount, color: 'var(--slab-red)' },
+            { label: 'SOS ALERTS', value: mockNotifications.filter(n => n.type === 'sos').length, color: 'var(--slab-red)' },
+            { label: 'GEOFENCE', value: mockNotifications.filter(n => n.type === 'geofence').length, color: 'var(--slab-blue)' },
+            { label: 'TOTAL TODAY', value: mockNotifications.length, color: 'var(--text-primary)' },
+          ].map(stat => (
+            <div key={stat.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid var(--bg-base)' }}>
+              <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>
+                {stat.label}
+              </span>
+              <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '20px', color: stat.color }}>
+                {stat.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </WebLayout>
   )
 }

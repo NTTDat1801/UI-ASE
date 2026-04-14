@@ -1,4 +1,9 @@
-export default function MobileFrame({ children }) {
+/**
+ * Centered auth / focused layout.
+ * Used for login, register, MFA, and child app screens.
+ * No sidebar — full-page beige canvas with a centered content panel.
+ */
+export default function MobileFrame({ children, maxWidth = '520px' }) {
   return (
     <div style={{
       minHeight: '100vh',
@@ -6,18 +11,15 @@ export default function MobileFrame({ children }) {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: '32px 16px',
+      padding: '40px 20px',
     }}>
       <div style={{
-        width: '390px',
-        minHeight: '844px',
+        width: '100%',
+        maxWidth,
         background: 'var(--bg-base)',
-        border: '3px solid var(--border)',
-        overflow: 'hidden',
-        position: 'relative',
         display: 'flex',
         flexDirection: 'column',
-        boxShadow: '6px 6px 0px #0D0D0D',
+        minHeight: '560px',
       }}>
         {children}
       </div>

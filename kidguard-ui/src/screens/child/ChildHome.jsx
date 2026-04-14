@@ -5,38 +5,38 @@ import StatusChip from '../../components/StatusChip'
 export default function ChildHome() {
   const navigate = useNavigate()
   return (
-    <MobileFrame>
+    <MobileFrame maxWidth="480px">
       {/* Top strip */}
       <div style={{
         background: '#fff', borderBottom: '2px solid var(--border)',
-        padding: '0 12px', height: '44px',
+        padding: '0 20px', height: '52px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
-        <span style={{ fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', fontFamily: 'var(--font-body)' }}>
+        <span style={{ fontSize: '13px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: 'var(--font-body)' }}>
           KIDGUARD
         </span>
         <StatusChip label="YOU'RE SAFE" variant="online" />
       </div>
 
-      <div style={{ flex: 1, padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      <div style={{ flex: 1, padding: '28px 24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
         {/* Status card */}
         <div style={{
           background: '#fff', border: '3px solid var(--border)',
-          boxShadow: '4px 4px 0 #0D0D0D', padding: '16px',
-          display: 'flex', flexDirection: 'column', gap: '8px',
+          boxShadow: '4px 4px 0 #0D0D0D', padding: '20px',
+          display: 'flex', flexDirection: 'column', gap: '10px',
         }}>
           <span style={{ background: 'var(--slab-green)', color: '#fff', fontSize: '11px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '2px 8px', display: 'inline-block', width: 'fit-content', fontFamily: 'var(--font-body)' }}>
             LOCATION SHARING ACTIVE
           </span>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
             <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>📍 Sharing with</span>
-            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '24px' }}>Dad</span>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>Minh Khang</span>
+            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '28px' }}>Dad</span>
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>Minh Khang</span>
           </div>
         </div>
 
         {/* Need help label */}
-        <div style={{ textAlign: 'center', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.12em', fontFamily: 'var(--font-body)' }}>
+        <div style={{ textAlign: 'center', fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.12em', fontFamily: 'var(--font-body)' }}>
           NEED HELP?
         </div>
 
@@ -50,7 +50,7 @@ export default function ChildHome() {
           <button
             onClick={() => navigate('/child/sos-confirm')}
             style={{
-              width: '100%', height: '140px',
+              width: '100%', height: '160px',
               background: 'var(--slab-red)',
               border: '3px solid var(--border)',
               boxShadow: '5px 5px 0 #0D0D0D',
@@ -67,13 +67,13 @@ export default function ChildHome() {
               e.currentTarget.style.boxShadow = '5px 5px 0 #0D0D0D'
             }}
           >
-            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: '48px', color: '#fff', letterSpacing: '0.05em' }}>
+            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: '56px', color: '#fff', letterSpacing: '0.05em' }}>
               SOS
             </span>
           </button>
         </div>
 
-        <div style={{ textAlign: 'center', fontSize: '11px', fontWeight: 500, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.08em', fontFamily: 'var(--font-body)' }}>
+        <div style={{ textAlign: 'center', fontSize: '12px', fontWeight: 500, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.08em', fontFamily: 'var(--font-body)' }}>
           HOLD TO SEND EMERGENCY ALERT
         </div>
       </div>
