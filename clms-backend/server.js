@@ -114,14 +114,7 @@ app.post('/api/geofences', async (req, res) => {
   })
 })
 
-app.post('/api/webhooks/arduino/gps', async (req, res) => {
-  const { childId, lat, lng, timestamp } = req.body ?? {}
-  if (!childId || !Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(timestamp)) {
-    return res.status(400).json({
-      message: 'Payload must include childId(string), lat(number), lng(number), timestamp(number).',
-    })
-  }
-
+async function upsertGpsLocation({ childId, lat, lng, timestamp }) {
   const [geofenceRows] = await pool.query(
     'SELECT center_lat, center_lng, radius_meters FROM geofence WHERE child_id = ? LIMIT 1',
     [childId],
@@ -136,6 +129,8 @@ app.post('/api/webhooks/arduino/gps', async (req, res) => {
     geofenceViolated = distanceFromCenterMeters > geofence.radius_meters
   }
 
+  const capturedAt = Math.trunc(timestamp)
+
   await pool.query(
     `INSERT INTO child_latest_location (child_id, lat, lng, captured_at, geofence_violated, distance_from_center_meters)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -145,13 +140,13 @@ app.post('/api/webhooks/arduino/gps', async (req, res) => {
        captured_at = VALUES(captured_at),
        geofence_violated = VALUES(geofence_violated),
        distance_from_center_meters = VALUES(distance_from_center_meters)`,
-    [childId, lat, lng, Math.trunc(timestamp), geofenceViolated, distanceFromCenterMeters],
+    [childId, lat, lng, capturedAt, geofenceViolated, distanceFromCenterMeters],
   )
 
   await pool.query(
     `INSERT INTO location_history (child_id, lat, lng, captured_at, geofence_violated, distance_from_center_meters)
      VALUES (?, ?, ?, ?, ?, ?)`,
-    [childId, lat, lng, Math.trunc(timestamp), geofenceViolated, distanceFromCenterMeters],
+    [childId, lat, lng, capturedAt, geofenceViolated, distanceFromCenterMeters],
   )
 
   await pool.query(
@@ -169,14 +164,145 @@ app.post('/api/webhooks/arduino/gps', async (req, res) => {
     [childId, childId],
   )
 
-  return res.status(202).json({
+  return {
     childId,
     lat,
     lng,
-    timestamp: Math.trunc(timestamp),
+    timestamp: capturedAt,
     geofenceViolated,
     distanceFromCenterMeters,
+  }
+}
+
+/** Arduino IoT Cloud "Data forwarding (Webhook)" often sends `{ values: [{ name, value }] }`. */
+function parseLatLngFromArduinoCloudBody(body) {
+  const vars = {}
+  const values = body?.values
+  if (Array.isArray(values)) {
+    for (const entry of values) {
+      const n = entry?.name
+      if (typeof n === 'string' && n.length > 0) {
+        vars[n.toLowerCase()] = entry.value
+      }
+    }
+  }
+  const pickNumber = (keys) => {
+    for (const k of keys) {
+      const v = vars[k.toLowerCase()]
+      if (typeof v === 'number' && Number.isFinite(v)) return v
+      if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
+    }
+    return null
+  }
+  let lat = pickNumber(['lat', 'latitude'])
+  let lng = pickNumber(['lng', 'lon', 'longitude'])
+  if (lat == null && Number.isFinite(body?.lat)) lat = body.lat
+  if (lng == null && Number.isFinite(body?.lng)) lng = body.lng
+  if (lat == null && Number.isFinite(body?.latitude)) lat = body.latitude
+  if (lng == null && Number.isFinite(body?.longitude)) lng = body.longitude
+
+  let ts = body?.timestamp ?? body?.time
+  if (typeof ts === 'string' && ts.trim() !== '') ts = Number(ts)
+  if (!Number.isFinite(ts)) ts = Date.now()
+  if (ts < 1e12) ts *= 1000
+
+  return { lat, lng, timestamp: ts }
+}
+
+app.post('/api/webhooks/arduino/gps', async (req, res) => {
+  const { childId, lat, lng, timestamp } = req.body ?? {}
+  if (!childId || !Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(timestamp)) {
+    return res.status(400).json({
+      message: 'Payload must include childId(string), lat(number), lng(number), timestamp(number).',
+    })
+  }
+  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  return res.status(202).json(result)
+})
+
+app.get('/api/webhooks/arduino/cloud', (_req, res) => {
+  res.json({
+    ok: true,
+    message: 'Arduino Cloud webhook target. Use POST. Pass childId as query (?childId=...) matching your Thing ID.',
   })
+})
+
+app.head('/api/webhooks/arduino/cloud', (_req, res) => {
+  res.status(200).end()
+})
+
+/**
+ * Receives Arduino IoT Cloud "Data forwarding" payloads.
+ * Configure URL (HTTPS, publicly reachable), e.g.:
+ *   https://YOUR_HOST/api/webhooks/arduino/cloud?childId=dcdfbea3-8fea-48ce-a45c-423b0f6057e8
+ * Cloud variables should include lat and lng (or latitude/longitude).
+ */
+app.post('/api/webhooks/arduino/cloud', async (req, res) => {
+  const childId =
+    (typeof req.query.childId === 'string' && req.query.childId) ||
+    (typeof req.body?.childId === 'string' && req.body.childId) ||
+    (typeof req.body?.thing_id === 'string' && req.body.thing_id) ||
+    (typeof req.body?.thingId === 'string' && req.body.thingId) ||
+    ''
+
+  const { lat, lng, timestamp } = parseLatLngFromArduinoCloudBody(req.body ?? {})
+  const hasCoords = Number.isFinite(lat) && Number.isFinite(lng)
+
+  if (!childId) {
+    if (!hasCoords) {
+      return res.status(200).json({
+        ok: true,
+        message:
+          'Webhook reachable. Add ?childId=<THING_ID> to the URL, or use /api/webhooks/arduino/cloud/<THING_ID>.',
+      })
+    }
+    return res.status(400).json({
+      message:
+        'Missing childId. Add ?childId=<your-thing-id> to the webhook URL in Arduino Cloud, or send childId/thing_id in JSON.',
+    })
+  }
+
+  if (!hasCoords) {
+    return res.status(200).json({
+      ok: true,
+      childId,
+      message: 'Webhook ready; no lat/lng in this request (Arduino Cloud URL check).',
+    })
+  }
+
+  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  return res.status(202).json(result)
+})
+
+/** Shorter URL for Arduino Cloud (no query string): .../cloud/<THING_ID> */
+app.get('/api/webhooks/arduino/cloud/:childId', (req, res) => {
+  res.json({
+    ok: true,
+    childId: req.params.childId,
+    message:
+      'Arduino Cloud webhook target. Use POST with JSON body; Cloud variables lat and lng (or latitude/longitude).',
+  })
+})
+
+app.head('/api/webhooks/arduino/cloud/:childId', (_req, res) => {
+  res.status(200).end()
+})
+
+app.post('/api/webhooks/arduino/cloud/:childId', async (req, res) => {
+  const { childId } = req.params
+  if (!childId || childId.length < 8) {
+    return res.status(400).json({ message: 'Invalid childId in path.' })
+  }
+  const { lat, lng, timestamp } = parseLatLngFromArduinoCloudBody(req.body ?? {})
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(200).json({
+      ok: true,
+      childId,
+      message: 'Webhook ready; no lat/lng in this request (Arduino Cloud URL check).',
+    })
+  }
+  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  return res.status(202).json(result)
 })
 
 app.get('/api/location/latest/:childId', async (req, res) => {
