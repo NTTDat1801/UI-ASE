@@ -1,12 +1,54 @@
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import WebLayout from '../../components/WebLayout'
-import MapMock from '../../components/MapMock'
 import StatusChip from '../../components/StatusChip'
 import Button from '../../components/Button'
 import { mockChild } from '../../data/mock'
 
 export default function LiveMap() {
   const navigate = useNavigate()
+  const [location, setLocation] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const apiBase = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8080'
+  const childId = import.meta.env.VITE_CHILD_ID || 'dcdfbea3-8fea-48ce-a45c-423b0f6057e8'
+
+  async function refreshLocation() {
+    setLoading(true)
+    setError('')
+    try {
+      const response = await fetch(`${apiBase}/api/location/latest/${encodeURIComponent(childId)}`)
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.message || 'Khong lay duoc du lieu vi tri.')
+      }
+      const data = await response.json()
+      setLocation(data)
+    } catch (apiError) {
+      setLocation(null)
+      setError(apiError.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    refreshLocation()
+    const intervalId = setInterval(refreshLocation, 5000)
+    return () => clearInterval(intervalId)
+  }, [])
+
+  const mapSrc = useMemo(() => {
+    if (!location) return ''
+    const { lat, lng } = location
+    return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - 0.01}%2C${lat - 0.01}%2C${lng + 0.01}%2C${lat + 0.01}&layer=mapnik&marker=${lat}%2C${lng}`
+  }, [location])
+
+  const updatedText = location
+    ? new Date(location.timestamp).toLocaleString()
+    : '--'
+
   return (
     <WebLayout active="map">
       {/* Page header */}
@@ -21,16 +63,27 @@ export default function LiveMap() {
             {' '}LOCATION
           </span>
         </div>
-        <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', border: '2px solid var(--border)', background: 'var(--bg-base)', padding: '4px 10px' }}>
-          2 MIN AGO
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <StatusChip label={location ? 'LIVE' : 'WAITING'} variant={location ? 'online' : 'warning'} />
+          <Button variant="ghost" onClick={refreshLocation}>REFRESH</Button>
+        </div>
       </div>
 
       {/* Map + info panel */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Full-height map */}
         <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-          <MapMock showPin showZone height="100%" />
+          {location ? (
+            <iframe
+              title="live-location-map"
+              src={mapSrc}
+              style={{ width: '100%', height: '100%', border: 0 }}
+            />
+          ) : (
+            <div style={{ padding: '20px', background: '#fff', height: '100%', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
+              {loading ? 'Dang tai vi tri hien tai...' : 'Chua co du lieu GPS tu Arduino. Hay gui webhook truoc.'}
+            </div>
+          )}
         </div>
 
         {/* Right info panel */}
@@ -47,31 +100,37 @@ export default function LiveMap() {
               {mockChild.name.toUpperCase()}
             </div>
             <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginBottom: '12px' }}>
-              {mockChild.location.address}
+              {location ? `${location.lat.toFixed(6)}, ${location.lng.toFixed(6)}` : mockChild.location.address}
             </div>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
-              <StatusChip label="INSIDE: HOME ZONE" variant="inside" />
-              <StatusChip label="GPS GOOD" variant="info" />
+              <StatusChip
+                label={location?.geofenceViolated ? 'OUTSIDE ZONE' : 'INSIDE ZONE'}
+                variant={location?.geofenceViolated ? 'outside' : 'inside'}
+              />
+              <StatusChip label="GPS ARDUINO" variant="info" />
             </div>
             <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-              Updated {mockChild.location.updatedAt}
+              Updated {updatedText}
             </div>
           </div>
 
           {/* Stats */}
           <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--bg-base)' }}>
-              <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>BATTERY</span>
-              <span style={{ fontSize: '14px', color: 'var(--slab-orange)', fontWeight: 600, fontFamily: 'var(--font-body)' }}>⚡ {mockChild.battery}%</span>
+              <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>DISTANCE</span>
+              <span style={{ fontSize: '14px', color: 'var(--slab-orange)', fontWeight: 600, fontFamily: 'var(--font-body)' }}>
+                {location?.distanceFromCenterMeters ? `${Math.round(location.distanceFromCenterMeters)} m` : '--'}
+              </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--bg-base)' }}>
               <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>STATUS</span>
-              <StatusChip label="ONLINE" variant="online" />
+              <StatusChip label={location ? 'ONLINE' : 'WAITING'} variant={location ? 'online' : 'warning'} />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0' }}>
-              <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>DEVICE ID</span>
-              <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{mockChild.deviceId}</span>
+              <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>CHILD ID</span>
+              <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{childId}</span>
             </div>
+            {error && <div style={{ color: 'var(--slab-red)', fontSize: '12px' }}>{error}</div>}
           </div>
 
           {/* Actions */}
