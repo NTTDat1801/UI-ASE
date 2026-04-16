@@ -305,6 +305,49 @@ app.post('/api/webhooks/arduino/cloud/:childId', async (req, res) => {
   return res.status(202).json(result)
 })
 
+/**
+ * Ultra-short webhook URL for providers with strict URL validation.
+ * Configure ARDUINO_CHILD_ID in env to avoid passing childId in URL/query.
+ */
+app.get('/w', (_req, res) => {
+  res.json({
+    ok: true,
+    message:
+      'Short Arduino webhook target. Use POST with lat/lng values. Configure ARDUINO_CHILD_ID on server.',
+  })
+})
+
+app.head('/w', (_req, res) => {
+  res.status(200).end()
+})
+
+app.post('/w', async (req, res) => {
+  const childId =
+    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) ||
+    (typeof req.body?.childId === 'string' && req.body.childId) ||
+    (typeof req.body?.thing_id === 'string' && req.body.thing_id) ||
+    ''
+
+  if (!childId) {
+    return res.status(200).json({
+      ok: true,
+      message: 'Webhook reachable. Set ARDUINO_CHILD_ID on server to save GPS data.',
+    })
+  }
+
+  const { lat, lng, timestamp } = parseLatLngFromArduinoCloudBody(req.body ?? {})
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(200).json({
+      ok: true,
+      childId,
+      message: 'Webhook ready; no lat/lng in this request.',
+    })
+  }
+
+  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  return res.status(202).json(result)
+})
+
 app.get('/api/location/latest/:childId', async (req, res) => {
   const { childId } = req.params
   const [rows] = await pool.query(
