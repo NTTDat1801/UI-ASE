@@ -34,6 +34,44 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
   return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
+function isWgs84(lat, lng) {
+  return Number.isFinite(lat) && Number.isFinite(lng)
+    && lat >= -90 && lat <= 90
+    && lng >= -180 && lng <= 180
+}
+
+/** Accept seconds or ms; return epoch ms or null if out of plausible range */
+function normalizeEpochMs(raw) {
+  let ts = raw
+  if (typeof ts === 'string' && ts.trim() !== '') ts = Number(ts)
+  if (!Number.isFinite(ts)) return null
+  let ms = Math.trunc(ts)
+  if (ms > 0 && ms < 1e12) ms *= 1000
+  const min = 946684800000
+  const max = Date.now() + 86400000 * 365 * 2
+  if (ms < min || ms > max) return null
+  return ms
+}
+
+function validateGpsForStorage({ lat, lng, timestamp }) {
+  if (!isWgs84(lat, lng)) {
+    return {
+      ok: false,
+      message:
+        'lat/lng must be decimal degrees (WGS84): lat in [-90,90], lng in [-180,180]. Example: lat 10.773, lng 106.66. In Shortcuts use "Latitude" and "Longitude" from the location, not raw internal numbers.',
+    }
+  }
+  const ms = normalizeEpochMs(timestamp)
+  if (ms == null) {
+    return {
+      ok: false,
+      message:
+        'timestamp must be Unix time in milliseconds (about 13 digits). In Shortcuts use Current Date → Format as epoch ms, or multiply seconds by 1000.',
+    }
+  }
+  return { ok: true, lat, lng, timestamp: ms }
+}
+
 async function ensureSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS geofence (
@@ -211,12 +249,17 @@ function parseLatLngFromArduinoCloudBody(body) {
 
 app.post('/api/webhooks/arduino/gps', async (req, res) => {
   const { childId, lat, lng, timestamp } = req.body ?? {}
-  if (!childId || !Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(timestamp)) {
+  if (!childId || !Number.isFinite(lat) || !Number.isFinite(lng)) {
     return res.status(400).json({
-      message: 'Payload must include childId(string), lat(number), lng(number), timestamp(number).',
+      message: 'Payload must include childId(string), lat(number), lng(number). Optional: timestamp(epoch ms); if omitted, server time is used.',
     })
   }
-  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  const ts = Number.isFinite(timestamp) ? timestamp : Date.now()
+  const v = validateGpsForStorage({ lat, lng, timestamp: ts })
+  if (!v.ok) {
+    return res.status(400).json({ message: v.message })
+  }
+  const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
   return res.status(202).json(result)
 })
 
@@ -270,7 +313,11 @@ app.post('/api/webhooks/arduino/cloud', async (req, res) => {
     })
   }
 
-  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  const v = validateGpsForStorage({ lat, lng, timestamp })
+  if (!v.ok) {
+    return res.status(400).json({ message: v.message })
+  }
+  const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
   return res.status(202).json(result)
 })
 
@@ -301,7 +348,11 @@ app.post('/api/webhooks/arduino/cloud/:childId', async (req, res) => {
       message: 'Webhook ready; no lat/lng in this request (Arduino Cloud URL check).',
     })
   }
-  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  const v = validateGpsForStorage({ lat, lng, timestamp })
+  if (!v.ok) {
+    return res.status(400).json({ message: v.message })
+  }
+  const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
   return res.status(202).json(result)
 })
 
@@ -344,7 +395,11 @@ app.post('/w', async (req, res) => {
     })
   }
 
-  const result = await upsertGpsLocation({ childId, lat, lng, timestamp })
+  const v = validateGpsForStorage({ lat, lng, timestamp })
+  if (!v.ok) {
+    return res.status(400).json({ message: v.message })
+  }
+  const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
   return res.status(202).json(result)
 })
 
