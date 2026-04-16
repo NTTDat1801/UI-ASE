@@ -9,6 +9,7 @@ Node.js REST backend that receives GPS updates from Arduino IoT Cloud webhook.
   - `lat` (number)
   - `lng` (number)
   - `timestamp` (epoch milliseconds, optional — if omitted the server uses current time)
+  - If `lat`/`lng` are **huge integers** (e.g. from Shortcuts), the server tries dividing by **10^5 … 10^16** independently for lat and lng until values fit WGS84 (so `/1e14` for both is not required; e.g. lat/1e14 + lng/1e12 may match).
 - `POST /api/webhooks/arduino/cloud` — for **Arduino IoT Cloud → Data forwarding (Webhook)**. Body is usually `{ "values": [ { "name": "lat", "value": ... }, ... ] }`. You must pass **`childId`** (same as Thing ID used in the UI) either:
   - as a query string on the webhook URL: `?childId=YOUR_THING_ID`, or
   - in JSON as `childId` or `thing_id`.

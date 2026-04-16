@@ -40,6 +40,25 @@ function isWgs84(lat, lng) {
     && lng >= -180 && lng <= 180
 }
 
+/**
+ * Some clients (e.g. Shortcuts) send lat/lng as huge integers. Try lat/10^a, lng/10^b
+ * until WGS84 fits. Same power for both (e.g. /1e14) rarely works for lng vs lat magnitude.
+ */
+function tryDenormalizeScaledIntegerGps(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+  if (isWgs84(lat, lng)) return { lat, lng, scaled: false }
+  const scales = []
+  for (let e = 5; e <= 16; e++) scales.push(10 ** e)
+  for (const slat of scales) {
+    for (const slng of scales) {
+      const la = lat / slat
+      const lo = lng / slng
+      if (isWgs84(la, lo)) return { lat: la, lng: lo, scaled: true }
+    }
+  }
+  return null
+}
+
 /** Accept seconds or ms; return epoch ms or null if out of plausible range */
 function normalizeEpochMs(raw) {
   let ts = raw
@@ -54,11 +73,12 @@ function normalizeEpochMs(raw) {
 }
 
 function validateGpsForStorage({ lat, lng, timestamp }) {
-  if (!isWgs84(lat, lng)) {
+  const decoded = tryDenormalizeScaledIntegerGps(lat, lng)
+  if (!decoded) {
     return {
       ok: false,
       message:
-        'lat/lng must be decimal degrees (WGS84): lat in [-90,90], lng in [-180,180]. Example: lat 10.773, lng 106.66. In Shortcuts use "Latitude" and "Longitude" from the location, not raw internal numbers.',
+        'lat/lng must be WGS84 decimal degrees, or huge integers that decode after dividing by powers of ten (e.g. Shortcuts). Example degrees: lat 10.773, lng 106.66.',
     }
   }
   const ms = normalizeEpochMs(timestamp)
@@ -69,7 +89,13 @@ function validateGpsForStorage({ lat, lng, timestamp }) {
         'timestamp must be Unix time in milliseconds (about 13 digits). In Shortcuts use Current Date → Format as epoch ms, or multiply seconds by 1000.',
     }
   }
-  return { ok: true, lat, lng, timestamp: ms }
+  return {
+    ok: true,
+    lat: decoded.lat,
+    lng: decoded.lng,
+    timestamp: ms,
+    integerScaled: decoded.scaled,
+  }
 }
 
 async function ensureSchema() {
@@ -260,7 +286,7 @@ app.post('/api/webhooks/arduino/gps', async (req, res) => {
     return res.status(400).json({ message: v.message })
   }
   const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
-  return res.status(202).json(result)
+  return res.status(202).json({ ...result, integerScaled: Boolean(v.integerScaled) })
 })
 
 app.get('/api/webhooks/arduino/cloud', (_req, res) => {
@@ -318,7 +344,7 @@ app.post('/api/webhooks/arduino/cloud', async (req, res) => {
     return res.status(400).json({ message: v.message })
   }
   const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
-  return res.status(202).json(result)
+  return res.status(202).json({ ...result, integerScaled: Boolean(v.integerScaled) })
 })
 
 /** Shorter URL for Arduino Cloud (no query string): .../cloud/<THING_ID> */
@@ -353,7 +379,7 @@ app.post('/api/webhooks/arduino/cloud/:childId', async (req, res) => {
     return res.status(400).json({ message: v.message })
   }
   const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
-  return res.status(202).json(result)
+  return res.status(202).json({ ...result, integerScaled: Boolean(v.integerScaled) })
 })
 
 /**
@@ -400,7 +426,7 @@ app.post('/w', async (req, res) => {
     return res.status(400).json({ message: v.message })
   }
   const result = await upsertGpsLocation({ childId, lat: v.lat, lng: v.lng, timestamp: v.timestamp })
-  return res.status(202).json(result)
+  return res.status(202).json({ ...result, integerScaled: Boolean(v.integerScaled) })
 })
 
 app.get('/api/location/latest/:childId', async (req, res) => {
