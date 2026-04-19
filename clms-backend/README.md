@@ -5,7 +5,7 @@ Node.js REST backend for **KidGuard**: stores GPS from **Arduino IoT Cloud** (po
 ## Arduino IoT Cloud (recommended: server poll)
 
 1. In [Arduino IoT Cloud](https://app.arduino.cc/) create **API credentials** (Integrations → API) and copy **Client ID** + **Client Secret**.
-2. Copy `.env.example` → `.env` and set at least:
+2. Edit **`clms-backend/.env`** in the repo (tracked file — use placeholders in git; fill real values only on machines you trust, never push live secrets to a public remote):
    - `ARDUINO_CLIENT_ID`, `ARDUINO_CLIENT_SECRET`
    - `ARDUINO_THING_ID` or `ARDUINO_CHILD_ID` — Thing UUID (same as `child_id` / KidGuard `VITE_CHILD_ID`)
 3. On the Thing, publish GPS in a Cloud variable **`Gps`** as JSON, e.g. `{"lat":"10.928","lon":"106.702"}`. Separate **`lat`** / **`lng`** variables are supported as a fallback (if both exist, **`Gps` is preferred** so stale scalars do not mask updates).
@@ -35,7 +35,7 @@ First validation `POST` may contain no GPS yet; the server responds **200**. Suc
 
 `POST /api/webhooks/arduino/gps` with JSON `childId`, `lat`, `lng`, optional `timestamp` (epoch ms). Non-decimal encodings may be normalized (see `validateGpsForStorage` in `server.js`).
 
-**Security:** never commit `ARDUINO_CLIENT_SECRET`. Revoke and rotate if it was ever exposed.
+**Security:** if `clms-backend/.env` is committed, use **placeholder** values in git and keep real secrets only locally, or use a **private** remote. Rotate Arduino keys if they were ever exposed (e.g. in an old `.env.example`).
 
 ## Geofence
 
@@ -43,7 +43,7 @@ First validation `POST` may contain no GPS yet; the server responds **200**. Suc
 
 ## Environment & run
 
-See `.env.example`. Defaults assume local MySQL `clms`.
+Configure **`clms-backend/.env`** (see variables there). Defaults assume local MySQL `clms`.
 
 ```bash
 cd clms-backend
