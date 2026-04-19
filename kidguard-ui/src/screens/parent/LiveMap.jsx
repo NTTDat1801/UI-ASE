@@ -12,7 +12,8 @@ export default function LiveMap() {
   const [error, setError] = useState('')
 
   const apiBase = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8080'
-  const childId = import.meta.env.VITE_CHILD_ID || 'dcdfbea3-8fea-48ce-a45c-423b0f6057e8'
+  const childId =
+    import.meta.env.VITE_CHILD_ID || 'cb184099-9a5c-4a47-a5cc-d712bff00f7a'
 
   async function refreshLocation() {
     setLoading(true)
@@ -81,7 +82,7 @@ export default function LiveMap() {
             />
           ) : (
             <div style={{ padding: '20px', background: '#fff', height: '100%', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
-              {loading ? 'Dang tai vi tri hien tai...' : 'Chua co du lieu GPS tu Arduino. Hay gui webhook truoc.'}
+              {loading ? 'Dang tai vi tri hien tai...' : 'Chua co du lieu GPS. Kiem tra backend (poll Arduino Cloud) va child_id.'}
             </div>
           )}
         </div>

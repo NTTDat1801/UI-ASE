@@ -1,63 +1,63 @@
 # CLMS Node Backend
 
-Node.js REST backend that receives GPS updates from Arduino IoT Cloud webhook.
+Node.js REST backend for **KidGuard**: stores GPS from **Arduino IoT Cloud** (poll or optional webhooks), MySQL `child_latest_location` + `location_history`, geofence flags.
 
-## Features
+## Arduino IoT Cloud (recommended: server poll)
 
-- `POST /api/webhooks/arduino/gps` receives payload:
-  - `childId` (string)
-  - `lat` (number)
-  - `lng` (number)
-  - `timestamp` (epoch milliseconds, optional — if omitted the server uses current time)
-  - If `lat`/`lng` are **huge integers** (e.g. from Shortcuts), the server tries dividing by **10^5 … 10^16** independently for lat and lng until values fit WGS84 (so `/1e14` for both is not required; e.g. lat/1e14 + lng/1e12 may match).
-- `POST /api/webhooks/arduino/cloud` — for **Arduino IoT Cloud → Data forwarding (Webhook)**. Body is usually `{ "values": [ { "name": "lat", "value": ... }, ... ] }`. You must pass **`childId`** (same as Thing ID used in the UI) either:
-  - as a query string on the webhook URL: `?childId=YOUR_THING_ID`, or
-  - in JSON as `childId` or `thing_id`.
-- `POST /api/webhooks/arduino/cloud/:childId` — same as above, but **Thing ID is in the path** (shorter URL, easier if Arduino’s field truncates query strings). Example: `https://YOUR_HOST/api/webhooks/arduino/cloud/dcdfbea3-8fea-48ce-a45c-423b0f6057e8`
-  Cloud variables should be named **`lat`** and **`lng`** (or `latitude` / `longitude`). If `timestamp` is omitted, the server uses the current time.
-  **Arduino Cloud URL check:** the first `POST` from Arduino may have no GPS yet; the server answers **200** so the webhook is accepted. Real updates still return **202** when `lat`/`lng` are present.
-- Stores current latest location per child in MySQL table `child_latest_location`
-- Stores location history in `location_history`
-- Keeps only the latest 100 history records per child
-- Detects geofence violation if geofence exists
+1. In [Arduino IoT Cloud](https://app.arduino.cc/) create **API credentials** (Integrations → API) and copy **Client ID** + **Client Secret**.
+2. Copy `.env.example` → `.env` and set at least:
+   - `ARDUINO_CLIENT_ID`, `ARDUINO_CLIENT_SECRET`
+   - `ARDUINO_THING_ID` or `ARDUINO_CHILD_ID` — Thing UUID (same as `child_id` / KidGuard `VITE_CHILD_ID`)
+3. On the Thing, publish GPS in a Cloud variable **`Gps`** as JSON, e.g. `{"lat":"10.928","lon":"106.702"}`. Separate **`lat`** / **`lng`** variables are supported as a fallback (if both exist, **`Gps` is preferred** so stale scalars do not mask updates).
+4. With valid env, the server **polls** the Cloud API every **`ARDUINO_POLL_INTERVAL_MS`** (default **60000**). Set **`ARDUINO_POLL_INTERVAL_MS=0`** to disable.
 
-## Geofence Setup
-
-Create or update geofence by child:
-
-- `POST /api/geofences`
-
-```json
-{
-  "childId": "child-001",
-  "centerLat": 10.773,
-  "centerLng": 106.659,
-  "radiusMeters": 300
-}
-```
-
-## Environment
-
-Create `.env` (or use defaults):
+Optional manual pull (same write path as poll):
 
 ```bash
-PORT=8080
-DB_HOST=localhost
-DB_PORT=3306
-DB_NAME=clms
-DB_USERNAME=clms_user
-DB_PASSWORD=123456
+curl -X POST http://localhost:8080/api/sync/arduino-cloud -H "Content-Type: application/json" -d "{}"
 ```
 
-## Run
+If **`ARDUINO_SYNC_TOKEN`** is set in `.env`, add header `x-arduino-sync-token: <token>` (or JSON `syncToken`).
 
-1. Start MySQL
-2. Install dependencies
-3. Run dev server:
+Uses OAuth2 `client_credentials` against `https://api2.arduino.cc/iot` ([Cloud API](https://docs.arduino.cc/cloud-api/)).
+
+### Optional: Data forwarding webhooks
+
+If you use **Arduino IoT Cloud → Data forwarding** instead of or in addition to poll:
+
+- `POST /api/webhooks/arduino/cloud` — body often `{ "values": [ { "name": "Gps", "value": "..." }, ... ] }`. Pass **`childId`** (Thing ID) as `?childId=...` or in JSON (`childId` / `thing_id`).
+- `POST /api/webhooks/arduino/cloud/:childId` — same, Thing ID in the path.
+- `POST /w` — short URL; set **`ARDUINO_CHILD_ID`** in `.env` so `childId` is not required in the URL.
+
+First validation `POST` may contain no GPS yet; the server responds **200**. Successful saves return **202**.
+
+### Optional: direct GPS POST (testing / custom clients)
+
+`POST /api/webhooks/arduino/gps` with JSON `childId`, `lat`, `lng`, optional `timestamp` (epoch ms). Non-decimal encodings may be normalized (see `validateGpsForStorage` in `server.js`).
+
+**Security:** never commit `ARDUINO_CLIENT_SECRET`. Revoke and rotate if it was ever exposed.
+
+## Geofence
+
+`POST /api/geofences` with `childId`, `centerLat`, `centerLng`, `radiusMeters`.
+
+## Environment & run
+
+See `.env.example`. Defaults assume local MySQL `clms`.
 
 ```bash
+cd clms-backend
 npm install
 npm run dev
 ```
 
-Backend starts at `http://localhost:8080`.
+Backend listens on **`PORT`** (default **8080**).
+
+## `location_history` snapshot
+
+If **`LOCATION_SNAPSHOT_INTERVAL_MS`** > 0, the server periodically copies `child_latest_location` → `location_history` (then trims to 100 rows per child). Default in code is **60000** ms if unset.
+
+- **Arduino poll only:** set **`LOCATION_SNAPSHOT_INTERVAL_MS=0`** to avoid duplicate history rows every minute (poll already inserts history on each update).
+- **Disable poll:** `ARDUINO_POLL_INTERVAL_MS=0`.
+
+Snapshots do not invent GPS: if `child_latest_location` is empty, only an occasional log line explains that.

@@ -3,6 +3,9 @@ import dotenv from 'dotenv'
 import express from 'express'
 import mysql from 'mysql2/promise'
 
+import { fetchThingPropertiesRaw, pickLatLngFromPropertiesPayload } from './arduinoCloud.js'
+import { tryExtractLatLngFromGpsJsonValue } from './gpsParse.js'
+
 dotenv.config()
 
 const app = express()
@@ -178,6 +181,129 @@ app.post('/api/geofences', async (req, res) => {
   })
 })
 
+let locationSnapshotEmptyHintShown = false
+
+async function trimLocationHistoryForChild(childId) {
+  await pool.query(
+    `DELETE FROM location_history
+     WHERE child_id = ?
+       AND id NOT IN (
+         SELECT id FROM (
+           SELECT id
+           FROM location_history
+           WHERE child_id = ?
+           ORDER BY captured_at DESC
+           LIMIT 100
+         ) AS keep_rows
+       )`,
+    [childId, childId],
+  )
+}
+
+/** Append current `child_latest_location` rows to `location_history` (scheduled snapshot). */
+async function snapshotLatestToHistory() {
+  const [rows] = await pool.query(
+    'SELECT child_id, lat, lng, geofence_violated, distance_from_center_meters FROM child_latest_location',
+  )
+  if (!Array.isArray(rows) || rows.length === 0) {
+    if (!locationSnapshotEmptyHintShown) {
+      locationSnapshotEmptyHintShown = true
+      console.log(
+        '[location snapshot] child_latest_location is still empty — snapshots only copy existing rows. Send GPS once (Arduino poll with API credentials, POST /api/sync/arduino-cloud, or POST /api/webhooks/arduino/gps). Further empty runs are silent.',
+      )
+    }
+    return
+  }
+
+  locationSnapshotEmptyHintShown = false
+
+  const now = Date.now()
+  for (const row of rows) {
+    await pool.query(
+      `INSERT INTO location_history (child_id, lat, lng, captured_at, geofence_violated, distance_from_center_meters)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        row.child_id,
+        row.lat,
+        row.lng,
+        now,
+        Boolean(row.geofence_violated),
+        row.distance_from_center_meters,
+      ],
+    )
+    await trimLocationHistoryForChild(row.child_id)
+  }
+  console.log(
+    `[location snapshot] archived ${rows.length} child row(s) from child_latest_location → location_history`,
+  )
+}
+
+/** Pull Thing properties from Arduino IoT Cloud and upsert GPS (uses Gps JSON or lat/lng variables). */
+async function pollArduinoCloudGpsToDb() {
+  const clientId = process.env.ARDUINO_CLIENT_ID
+  const clientSecret = process.env.ARDUINO_CLIENT_SECRET
+  const thingId =
+    (typeof process.env.ARDUINO_THING_ID === 'string' && process.env.ARDUINO_THING_ID) ||
+    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) ||
+    ''
+  const childId =
+    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) || thingId
+
+  if (!clientId || !clientSecret || !thingId) {
+    return
+  }
+
+  const payload = await fetchThingPropertiesRaw(thingId)
+  const { lat, lng, vars } = pickLatLngFromPropertiesPayload(payload)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    console.log('[arduino poll] no lat/lng in Thing properties', Object.keys(vars))
+    return
+  }
+
+  const v = validateGpsForStorage({ lat, lng, timestamp: Date.now() })
+  if (!v.ok) {
+    console.warn('[arduino poll]', v.message)
+    return
+  }
+
+  await upsertGpsLocation({
+    childId,
+    lat: v.lat,
+    lng: v.lng,
+    timestamp: v.timestamp,
+  })
+  console.log('[arduino poll] saved', childId, v.lat, v.lng)
+}
+
+function startArduinoCloudPollScheduler() {
+  const clientId = process.env.ARDUINO_CLIENT_ID
+  const clientSecret = process.env.ARDUINO_CLIENT_SECRET
+  const thingId =
+    (typeof process.env.ARDUINO_THING_ID === 'string' && process.env.ARDUINO_THING_ID) ||
+    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) ||
+    ''
+
+  const pollMs = Number(process.env.ARDUINO_POLL_INTERVAL_MS ?? 60_000)
+  if (!clientId || !clientSecret || !thingId || !Number.isFinite(pollMs) || pollMs <= 0) {
+    return
+  }
+
+  const run = () => {
+    pollArduinoCloudGpsToDb().catch((err) => {
+      console.error('[arduino poll]', err.message)
+    })
+  }
+
+  const bootDelay = Number(process.env.ARDUINO_POLL_BOOT_DELAY_MS ?? 5_000)
+  if (Number.isFinite(bootDelay) && bootDelay >= 0) {
+    setTimeout(run, bootDelay)
+  }
+  setInterval(run, pollMs)
+
+  const label = pollMs >= 60_000 ? `${Math.round(pollMs / 60_000)} min` : `${Math.round(pollMs / 1000)} s`
+  console.log(`Arduino Cloud GPS poll every ${label} (thing ${thingId})`)
+}
+
 async function upsertGpsLocation({ childId, lat, lng, timestamp }) {
   const [geofenceRows] = await pool.query(
     'SELECT center_lat, center_lng, radius_meters FROM geofence WHERE child_id = ? LIMIT 1',
@@ -213,20 +339,7 @@ async function upsertGpsLocation({ childId, lat, lng, timestamp }) {
     [childId, lat, lng, capturedAt, geofenceViolated, distanceFromCenterMeters],
   )
 
-  await pool.query(
-    `DELETE FROM location_history
-     WHERE child_id = ?
-       AND id NOT IN (
-         SELECT id FROM (
-           SELECT id
-           FROM location_history
-           WHERE child_id = ?
-           ORDER BY captured_at DESC
-           LIMIT 100
-         ) AS keep_rows
-       )`,
-    [childId, childId],
-  )
+  await trimLocationHistoryForChild(childId)
 
   return {
     childId,
@@ -258,8 +371,21 @@ function parseLatLngFromArduinoCloudBody(body) {
     }
     return null
   }
-  let lat = pickNumber(['lat', 'latitude'])
-  let lng = pickNumber(['lng', 'lon', 'longitude'])
+  let lat = null
+  let lng = null
+  for (const k of ['gps', 'location', 'position']) {
+    const v = vars[k]
+    const pair = tryExtractLatLngFromGpsJsonValue(v)
+    if (pair) {
+      lat = pair.lat
+      lng = pair.lng
+      break
+    }
+  }
+  if (lat == null || lng == null) {
+    lat = pickNumber(['lat', 'latitude'])
+    lng = pickNumber(['lng', 'lon', 'longitude'])
+  }
   if (lat == null && Number.isFinite(body?.lat)) lat = body.lat
   if (lng == null && Number.isFinite(body?.lng)) lng = body.lng
   if (lat == null && Number.isFinite(body?.latitude)) lat = body.latitude
@@ -429,6 +555,77 @@ app.post('/w', async (req, res) => {
   return res.status(202).json({ ...result, integerScaled: Boolean(v.integerScaled) })
 })
 
+/**
+ * Pull latest lat/lng from Arduino IoT Cloud Thing properties and save to DB.
+ * Requires ARDUINO_CLIENT_ID + ARDUINO_CLIENT_SECRET.
+ * Optional: ARDUINO_THING_ID (defaults to ARDUINO_CHILD_ID), ARDUINO_SYNC_TOKEN (required header if set).
+ */
+app.post('/api/sync/arduino-cloud', async (req, res) => {
+  const syncToken = process.env.ARDUINO_SYNC_TOKEN
+  if (syncToken) {
+    const provided = req.headers['x-arduino-sync-token'] ?? req.body?.syncToken
+    if (provided !== syncToken) {
+      return res.status(401).json({ message: 'Invalid or missing x-arduino-sync-token / syncToken.' })
+    }
+  }
+
+  const thingId =
+    (typeof req.body?.thingId === 'string' && req.body.thingId) ||
+    (typeof process.env.ARDUINO_THING_ID === 'string' && process.env.ARDUINO_THING_ID) ||
+    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) ||
+    ''
+
+  const childId =
+    (typeof req.body?.childId === 'string' && req.body.childId) ||
+    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) ||
+    thingId
+
+  if (!thingId) {
+    return res.status(400).json({
+      message: 'Set ARDUINO_THING_ID or ARDUINO_CHILD_ID, or pass thingId in JSON body.',
+    })
+  }
+
+  try {
+    const payload = await fetchThingPropertiesRaw(thingId)
+    const { lat, lng, vars } = pickLatLngFromPropertiesPayload(payload)
+    const ts = Date.now()
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(404).json({
+        message:
+          'No lat/lng on this Thing. Create Cloud variables named lat and lng (or latitude/longitude) and publish values.',
+        propertyNames: Object.keys(vars),
+      })
+    }
+
+    const v = validateGpsForStorage({ lat, lng, timestamp: ts })
+    if (!v.ok) {
+      return res.status(400).json({ message: v.message })
+    }
+
+    const result = await upsertGpsLocation({
+      childId,
+      lat: v.lat,
+      lng: v.lng,
+      timestamp: v.timestamp,
+    })
+
+    return res.status(202).json({
+      ...result,
+      source: 'arduino-cloud-api',
+      thingId,
+      integerScaled: Boolean(v.integerScaled),
+      propertyNames: Object.keys(vars),
+    })
+  } catch (err) {
+    console.error('Arduino Cloud sync:', err)
+    return res.status(502).json({
+      message: err?.message || 'Arduino Cloud sync failed.',
+    })
+  }
+})
+
 app.get('/api/location/latest/:childId', async (req, res) => {
   const { childId } = req.params
   const [rows] = await pool.query(
@@ -469,6 +666,30 @@ ensureSchema()
     app.listen(port, () => {
       console.log(`CLMS backend running on http://localhost:${port}`)
     })
+
+    // Default 1 min for testing; set LOCATION_SNAPSHOT_INTERVAL_MS=3600000 in .env for 60 min production.
+    const snapshotMs = Number(process.env.LOCATION_SNAPSHOT_INTERVAL_MS ?? 60 * 1000)
+    if (Number.isFinite(snapshotMs) && snapshotMs > 0) {
+      const runSnapshot = () => {
+        snapshotLatestToHistory().catch((err) => {
+          console.error('Scheduled location_history snapshot:', err.message)
+        })
+      }
+      const bootDelay = Number(process.env.LOCATION_SNAPSHOT_BOOT_DELAY_MS ?? 10_000)
+      if (Number.isFinite(bootDelay) && bootDelay >= 0) {
+        setTimeout(runSnapshot, bootDelay)
+      }
+      setInterval(runSnapshot, snapshotMs)
+      const intervalLabel =
+        snapshotMs >= 60_000
+          ? `${Math.round(snapshotMs / 60_000)} min`
+          : `${Math.round(snapshotMs / 1000)} s`
+      console.log(
+        `Scheduled copy of child_latest_location → location_history every ${intervalLabel} (first run after ${bootDelay}ms)`,
+      )
+    }
+
+    startArduinoCloudPollScheduler()
   })
   .catch((error) => {
     console.error('Failed to initialize DB schema:', error.message)

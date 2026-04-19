@@ -13,7 +13,7 @@ KidGuard is a **19-screen React UI prototype** built for two user roles:
 | Parent | 14      | Monitor child location, manage zones, get alerts |
 | Child  | 5       | Share location, trigger SOS emergency alert      |
 
-All data is mocked/static — no backend required.
+Most parent/child flows use **mock/static data**. **Live Map** (`/map`) loads the child’s latest position from the **CLMS backend** when `VITE_BACKEND_API_URL` (and `VITE_CHILD_ID`) are set in `.env`.
 
 ---
 
