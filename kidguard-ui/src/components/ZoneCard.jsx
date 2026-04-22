@@ -1,10 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const colors = ['#2A5BF5', '#E8631A', '#1A8C4E', '#D92B2B']
 
-export default function ZoneCard({ zone }) {
+export default function ZoneCard({ zone, onToggle, onDelete }) {
   const [active, setActive] = useState(zone.active)
   const color = colors[zone.id % colors.length]
+
+  useEffect(() => {
+    setActive(zone.active)
+  }, [zone.active])
 
   return (
     <div style={{
@@ -23,7 +27,11 @@ export default function ZoneCard({ zone }) {
         </div>
       </div>
       <div
-        onClick={() => setActive(!active)}
+        onClick={() => {
+          const next = !active
+          setActive(next)
+          onToggle?.(next)
+        }}
         style={{
           width: '44px', height: '24px',
           background: active ? 'var(--slab-blue)' : 'var(--text-muted)',
@@ -41,6 +49,24 @@ export default function ZoneCard({ zone }) {
           transition: 'left 0.2s',
         }} />
       </div>
+      {onDelete && (
+        <button
+          type="button"
+          onClick={onDelete}
+          style={{
+            border: '2px solid var(--slab-red)',
+            color: 'var(--slab-red)',
+            background: '#fff',
+            fontSize: '10px',
+            fontWeight: 600,
+            padding: '4px 8px',
+            cursor: 'pointer',
+            letterSpacing: '0.05em',
+          }}
+        >
+          DEL
+        </button>
+      )}
     </div>
   )
 }

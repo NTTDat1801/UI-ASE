@@ -1,54 +1,96 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import WebLayout from '../../components/WebLayout'
 import StatusChip from '../../components/StatusChip'
 import Button from '../../components/Button'
-import { mockChild } from '../../data/mock'
+import MultiChildMap from '../../components/MultiChildMap'
+import { loadChildrenConfig, mergeChildren, saveChildrenConfig } from '../../utils/childrenConfig'
 
 export default function LiveMap() {
   const navigate = useNavigate()
-  const [location, setLocation] = useState(null)
+  const [locations, setLocations] = useState([])
+  const [zonesByChild, setZonesByChild] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   const apiBase = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8080'
-  const childId =
-    import.meta.env.VITE_CHILD_ID || 'cb184099-9a5c-4a47-a5cc-d712bff00f7a'
+  const [children, setChildren] = useState(() => loadChildrenConfig().filter((x) => x.active !== false))
+  const childIds = useMemo(() => children.map((c) => c.childId), [children])
 
-  async function refreshLocation() {
+  const refreshLocation = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const response = await fetch(`${apiBase}/api/location/latest/${encodeURIComponent(childId)}`)
+      if (childIds.length === 0) {
+        const childRes = await fetch(`${apiBase}/api/children`)
+        if (childRes.ok) {
+          const childRows = await childRes.json().catch(() => [])
+          const merged = mergeChildren(loadChildrenConfig(), childRows).filter((x) => x.active !== false)
+          setChildren(merged)
+          saveChildrenConfig(merged)
+        }
+        setLocations([])
+        setLoading(false)
+        return
+      }
+
+      const childRes = await fetch(`${apiBase}/api/children`)
+      if (childRes.ok) {
+        const childRows = await childRes.json().catch(() => [])
+        const mergedChildren = mergeChildren(loadChildrenConfig(), childRows).filter((x) => x.active !== false)
+        setChildren(mergedChildren)
+        saveChildrenConfig(mergedChildren)
+      }
+
+      const idsParam = encodeURIComponent(childIds.join(','))
+      const response = await fetch(`${apiBase}/api/location/latest?childIds=${idsParam}`)
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
         throw new Error(data.message || 'Khong lay duoc du lieu vi tri.')
       }
       const data = await response.json()
-      setLocation(data)
+      const rows = Array.isArray(data) ? data : []
+      const byId = new Map(children.map((c) => [c.childId, c]))
+      const merged = rows
+        .filter((row) => Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lng)))
+        .map((row) => ({
+          ...row,
+          lat: Number(row.lat),
+          lng: Number(row.lng),
+          timestamp: Number(row.timestamp),
+          displayName: byId.get(row.childId)?.displayName || row.childId,
+        }))
+      setLocations(merged)
+
+      const zoneRes = await fetch(`${apiBase}/api/safezones`)
+      if (zoneRes.ok) {
+        const zoneRows = await zoneRes.json().catch(() => [])
+        setZonesByChild({
+          __ALL__: (Array.isArray(zoneRows) ? zoneRows : []).filter((z) => z.active !== false),
+        })
+      } else {
+        setZonesByChild({})
+      }
     } catch (apiError) {
-      setLocation(null)
+      setLocations([])
       setError(apiError.message)
     } finally {
       setLoading(false)
     }
-  }
+  }, [apiBase, childIds, children])
 
   useEffect(() => {
     refreshLocation()
     const intervalId = setInterval(refreshLocation, 5000)
     return () => clearInterval(intervalId)
-  }, [])
+  }, [refreshLocation])
 
-  const mapSrc = useMemo(() => {
-    if (!location) return ''
-    const { lat, lng } = location
-    return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - 0.01}%2C${lat - 0.01}%2C${lng + 0.01}%2C${lat + 0.01}&layer=mapnik&marker=${lat}%2C${lng}`
-  }, [location])
+  const newest = useMemo(() => {
+    if (locations.length === 0) return null
+    return [...locations].sort((a, b) => b.timestamp - a.timestamp)[0]
+  }, [locations])
 
-  const updatedText = location
-    ? new Date(location.timestamp).toLocaleString()
-    : '--'
+  const updatedText = newest ? new Date(newest.timestamp).toLocaleString() : '--'
 
   return (
     <WebLayout active="map">
@@ -65,21 +107,17 @@ export default function LiveMap() {
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <StatusChip label={location ? 'LIVE' : 'WAITING'} variant={location ? 'online' : 'warning'} />
+          <StatusChip label={locations.length > 0 ? 'LIVE' : 'WAITING'} variant={locations.length > 0 ? 'online' : 'warning'} />
           <Button variant="ghost" onClick={refreshLocation}>REFRESH</Button>
         </div>
       </div>
 
       {/* Map + info panel */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative', zIndex: 1 }}>
         {/* Full-height map */}
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-          {location ? (
-            <iframe
-              title="live-location-map"
-              src={mapSrc}
-              style={{ width: '100%', height: '100%', border: 0 }}
-            />
+        <div style={{ flex: 1, minWidth: 0, position: 'relative', overflow: 'hidden', zIndex: 0 }}>
+          {locations.length > 0 ? (
+            <MultiChildMap locations={locations} zonesByChild={zonesByChild} />
           ) : (
             <div style={{ padding: '20px', background: '#fff', height: '100%', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
               {loading ? 'Dang tai vi tri hien tai...' : 'Chua co du lieu GPS. Kiem tra backend (poll Arduino Cloud) va child_id.'}
@@ -98,15 +136,15 @@ export default function LiveMap() {
           {/* Child header */}
           <div style={{ padding: '24px', borderBottom: '2px solid var(--border)' }}>
             <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '26px', marginBottom: '8px' }}>
-              {mockChild.name.toUpperCase()}
+              {locations.length > 1 ? `${locations.length} CHILDREN` : (locations[0]?.displayName || 'NO CHILD')}
             </div>
             <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginBottom: '12px' }}>
-              {location ? `${location.lat.toFixed(6)}, ${location.lng.toFixed(6)}` : mockChild.location.address}
+              {newest ? `${newest.lat.toFixed(6)}, ${newest.lng.toFixed(6)}` : '--'}
             </div>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
               <StatusChip
-                label={location?.geofenceViolated ? 'OUTSIDE ZONE' : 'INSIDE ZONE'}
-                variant={location?.geofenceViolated ? 'outside' : 'inside'}
+                label={newest?.geofenceViolated ? 'OUTSIDE ZONE' : 'INSIDE ZONE'}
+                variant={newest?.geofenceViolated ? 'outside' : 'inside'}
               />
               <StatusChip label="GPS ARDUINO" variant="info" />
             </div>
@@ -120,16 +158,16 @@ export default function LiveMap() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--bg-base)' }}>
               <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>DISTANCE</span>
               <span style={{ fontSize: '14px', color: 'var(--slab-orange)', fontWeight: 600, fontFamily: 'var(--font-body)' }}>
-                {location?.distanceFromCenterMeters ? `${Math.round(location.distanceFromCenterMeters)} m` : '--'}
+                {newest?.distanceFromCenterMeters ? `${Math.round(newest.distanceFromCenterMeters)} m` : '--'}
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--bg-base)' }}>
               <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>STATUS</span>
-              <StatusChip label={location ? 'ONLINE' : 'WAITING'} variant={location ? 'online' : 'warning'} />
+              <StatusChip label={locations.length > 0 ? 'ONLINE' : 'WAITING'} variant={locations.length > 0 ? 'online' : 'warning'} />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0' }}>
-              <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>CHILD ID</span>
-              <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{childId}</span>
+              <span style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', letterSpacing: '0.04em' }}>TRACKING</span>
+              <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{childIds.length} child IDs</span>
             </div>
             {error && <div style={{ color: 'var(--slab-red)', fontSize: '12px' }}>{error}</div>}
           </div>

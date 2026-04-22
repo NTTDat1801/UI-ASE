@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import WebLayout from '../../components/WebLayout'
 import StatusChip from '../../components/StatusChip'
 import Button from '../../components/Button'
+import { loadChildrenConfig } from '../../utils/childrenConfig'
 import {
   buildStaysFromHistory,
   formatDurationMs,
@@ -44,10 +45,18 @@ function dayTabMeta(offsetFromToday) {
   return { label, start }
 }
 
+function overlapDurationMs(startA, endA, startB, endB) {
+  const start = Math.max(startA, startB)
+  const end = Math.min(endA, endB)
+  return Math.max(0, end - start)
+}
+
 export default function History() {
   const apiBase = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8080'
-  const childId =
-    import.meta.env.VITE_CHILD_ID || 'cb184099-9a5c-4a47-a5cc-d712bff00f7a'
+  const children = useMemo(() => loadChildrenConfig().filter((c) => c.active !== false), [])
+  const [childId, setChildId] = useState(
+    children[0]?.childId || import.meta.env.VITE_CHILD_ID || 'cb184099-9a5c-4a47-a5cc-d712bff00f7a',
+  )
 
   const [raw, setRaw] = useState([])
   const [loading, setLoading] = useState(true)
@@ -91,15 +100,22 @@ export default function History() {
   )
 
   const activeDayStart = dayTabs[activeTab]?.start ?? startOfLocalDay(new Date())
+  const activeDayEnd = activeDayStart + 24 * 60 * 60 * 1000
 
   const staysForDay = useMemo(
-    () => stays.filter((s) => sameLocalDay(s.startTs, activeDayStart)),
-    [stays, activeDayStart],
+    () =>
+      stays
+        .filter((s) => overlapDurationMs(s.startTs, s.endTs, activeDayStart, activeDayEnd) > 0)
+        .map((s) => ({
+          ...s,
+          dayOverlapMs: overlapDurationMs(s.startTs, s.endTs, activeDayStart, activeDayEnd),
+        })),
+    [stays, activeDayStart, activeDayEnd],
   )
 
   const summary = useMemo(() => {
     const n = staysForDay.length
-    const totalMs = staysForDay.reduce((a, s) => a + (s.endTs - s.startTs), 0)
+    const totalMs = staysForDay.reduce((a, s) => a + (s.dayOverlapMs || 0), 0)
     return {
       locationsVisited: n,
       totalTracked: formatDurationMs(totalMs),
@@ -110,6 +126,11 @@ export default function History() {
     () =>
       shortClusters.filter((c) => sameLocalDay(c.startTs, activeDayStart)).reduce((a, c) => a + c.sampleCount, 0),
     [shortClusters, activeDayStart],
+  )
+
+  const rawForDay = useMemo(
+    () => raw.filter((p) => sameLocalDay(p.timestamp, activeDayStart)).sort((a, b) => b.timestamp - a.timestamp),
+    [raw, activeDayStart],
   )
 
   return (
@@ -145,6 +166,26 @@ export default function History() {
           flexWrap: 'wrap',
         }}
       >
+        <select
+          value={childId}
+          onChange={(e) => setChildId(e.target.value)}
+          style={{
+            border: '2px solid var(--border)',
+            background: '#fff',
+            padding: '6px 10px',
+            fontFamily: 'var(--font-body)',
+            fontSize: '11px',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+          }}
+        >
+          {children.map((child) => (
+            <option key={child.childId} value={child.childId}>
+              {child.displayName}
+            </option>
+          ))}
+        </select>
         {dayTabs.map((tab, i) => (
           <button
             key={tab.start}
@@ -202,6 +243,54 @@ export default function History() {
             </div>
           )}
 
+          {!loading && staysForDay.length === 0 && rawForDay.length > 0 && (
+            <div>
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  textTransform: 'uppercase',
+                  color: 'var(--text-muted)',
+                  letterSpacing: '0.06em',
+                  borderBottom: '2px solid var(--border)',
+                  padding: '16px 0 8px',
+                  fontFamily: 'var(--font-body)',
+                }}
+              >
+                {dayTabs[activeTab].label} · RAW GPS TIMELINE
+              </div>
+              {rawForDay.slice(0, 20).map((row, i) => (
+                <div
+                  key={`${row.timestamp}-${i}`}
+                  style={{
+                    display: 'flex',
+                    gap: '0',
+                    padding: '12px 0',
+                    borderBottom: '2px solid var(--border)',
+                    alignItems: 'flex-start',
+                  }}
+                >
+                  <div style={{ width: '64px', flexShrink: 0 }}>
+                    <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                      {formatClock(row.timestamp)}
+                    </span>
+                  </div>
+                  <div style={{ width: '24px', flexShrink: 0, display: 'flex', justifyContent: 'center', paddingTop: '4px' }}>
+                    <div style={{ width: '2px', background: '#C0BAB0', height: '100%', minHeight: '30px', borderLeft: '2px dashed #C0BAB0' }} />
+                  </div>
+                  <div style={{ flex: 1, paddingLeft: '12px' }}>
+                    <div style={{ fontSize: '14px', fontWeight: 600, fontFamily: 'var(--font-body)' }}>
+                      {formatCoordLabel(row.lat, row.lng)}
+                    </div>
+                    <div style={{ marginTop: '6px' }}>
+                      <StatusChip label="RAW POINT" variant="white" />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {!loading && staysForDay.length > 0 && (
             <div>
               <div
@@ -220,7 +309,7 @@ export default function History() {
               </div>
 
               {staysForDay.map((stay, i) => {
-                const durationMs = stay.endTs - stay.startTs
+                const durationMs = stay.dayOverlapMs || (stay.endTs - stay.startTs)
                 const durationLabel = formatDurationMs(durationMs)
                 const isOngoing =
                   activeTab === 0 &&

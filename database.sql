@@ -8,44 +8,89 @@ CREATE DATABASE IF NOT EXISTS clms
 
 USE clms;
 
-CREATE TABLE IF NOT EXISTS geofence (
-  id BIGINT NOT NULL AUTO_INCREMENT,
-  child_id VARCHAR(128) NOT NULL,
-  center_lat DOUBLE NOT NULL,
-  center_lng DOUBLE NOT NULL,
-  radius_meters DOUBLE NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY child_id (child_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- clms.child_latest_location definition
 
-CREATE TABLE IF NOT EXISTS child_latest_location (
-  id BIGINT NOT NULL AUTO_INCREMENT,
-  child_id VARCHAR(128) NOT NULL,
-  lat DOUBLE NOT NULL,
-  lng DOUBLE NOT NULL,
-  captured_at BIGINT NOT NULL COMMENT 'Unix epoch ms when position was captured',
-  geofence_violated TINYINT(1) NOT NULL DEFAULT 0,
-  distance_from_center_meters DOUBLE DEFAULT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY child_id (child_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE `child_latest_location` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `child_id` varchar(128) NOT NULL,
+  `lat` double NOT NULL,
+  `lng` double NOT NULL,
+  `captured_at` bigint NOT NULL,
+  `geofence_violated` tinyint(1) NOT NULL DEFAULT '0',
+  `distance_from_center_meters` double DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `child_id` (`child_id`)
+) ENGINE=InnoDB AUTO_INCREMENT=133 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS location_history (
-  id BIGINT NOT NULL AUTO_INCREMENT,
-  child_id VARCHAR(128) NOT NULL,
-  lat DOUBLE NOT NULL,
-  lng DOUBLE NOT NULL,
-  captured_at BIGINT NOT NULL,
-  geofence_violated TINYINT(1) NOT NULL DEFAULT 0,
-  distance_from_center_meters DOUBLE DEFAULT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  KEY idx_location_history_child_time (child_id, captured_at DESC)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- clms.children definition
+
+CREATE TABLE `children` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `child_id` varchar(128) NOT NULL,
+  `display_name` varchar(128) NOT NULL,
+  `thing_id` varchar(128) DEFAULT NULL,
+  `active` tinyint(1) NOT NULL DEFAULT '1',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `child_id` (`child_id`)
+) ENGINE=InnoDB AUTO_INCREMENT=23 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- clms.geofence definition
+
+CREATE TABLE `geofence` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `child_id` varchar(128) NOT NULL,
+  `center_lat` double NOT NULL,
+  `center_lng` double NOT NULL,
+  `radius_meters` double NOT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `child_id` (`child_id`)
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- clms.location_history definition
+
+CREATE TABLE `location_history` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `child_id` varchar(128) NOT NULL,
+  `lat` double NOT NULL,
+  `lng` double NOT NULL,
+  `captured_at` bigint NOT NULL,
+  `geofence_violated` tinyint(1) NOT NULL DEFAULT '0',
+  `distance_from_center_meters` double DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_location_history_child_time` (`child_id`,`captured_at` DESC)
+) ENGINE=InnoDB AUTO_INCREMENT=152 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- clms.safe_zones definition
+
+CREATE TABLE `safe_zones` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `child_id` varchar(128) NOT NULL,
+  `zone_name` varchar(128) NOT NULL,
+  `center_lat` double NOT NULL,
+  `center_lng` double NOT NULL,
+  `radius_meters` double NOT NULL,
+  `active` tinyint(1) NOT NULL DEFAULT '1',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `shape_type` varchar(16) NOT NULL DEFAULT 'circle',
+  `corner_a_lat` double DEFAULT NULL,
+  `corner_a_lng` double DEFAULT NULL,
+  `corner_c_lat` double DEFAULT NULL,
+  `corner_c_lng` double DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_safe_zones_child` (`child_id`,`active`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
 
@@ -91,4 +136,6 @@ INSERT INTO location_history (
   0,
   NULL
 );
+
+
 

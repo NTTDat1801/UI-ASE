@@ -23,6 +23,7 @@ const dbConfig = {
 }
 
 const pool = mysql.createPool(dbConfig)
+const GLOBAL_SAFEZONE_CHILD_ID = '__ALL__'
 
 app.use(cors())
 app.use(express.json())
@@ -41,6 +42,14 @@ function isWgs84(lat, lng) {
   return Number.isFinite(lat) && Number.isFinite(lng)
     && lat >= -90 && lat <= 90
     && lng >= -180 && lng <= 180
+}
+
+function parseCsvIds(raw) {
+  if (typeof raw !== 'string') return []
+  return raw
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
 }
 
 /**
@@ -103,6 +112,60 @@ function validateGpsForStorage({ lat, lng, timestamp }) {
 
 async function ensureSchema() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS children (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      child_id VARCHAR(128) NOT NULL UNIQUE,
+      display_name VARCHAR(128) NOT NULL,
+      thing_id VARCHAR(128) NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS safe_zones (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      child_id VARCHAR(128) NOT NULL,
+      zone_name VARCHAR(128) NOT NULL,
+      shape_type VARCHAR(16) NOT NULL DEFAULT 'circle',
+      center_lat DOUBLE NOT NULL,
+      center_lng DOUBLE NOT NULL,
+      radius_meters DOUBLE NOT NULL,
+      corner_a_lat DOUBLE NULL,
+      corner_a_lng DOUBLE NULL,
+      corner_c_lat DOUBLE NULL,
+      corner_c_lng DOUBLE NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_safe_zones_child (child_id, active)
+    )
+  `)
+
+  // Backfill new rectangle columns for existing deployments (compatible with MySQL versions
+  // that do not support `ADD COLUMN IF NOT EXISTS`).
+  const ensureColumn = async (tableName, columnName, ddl) => {
+    const [rows] = await pool.query(
+      `SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema = DATABASE()
+         AND table_name = ?
+         AND column_name = ?
+       LIMIT 1`,
+      [tableName, columnName],
+    )
+    if (Array.isArray(rows) && rows.length > 0) return
+    await pool.query(`ALTER TABLE ${tableName} ADD COLUMN ${ddl}`)
+  }
+
+  await ensureColumn('safe_zones', 'shape_type', "shape_type VARCHAR(16) NOT NULL DEFAULT 'circle'")
+  await ensureColumn('safe_zones', 'corner_a_lat', 'corner_a_lat DOUBLE NULL')
+  await ensureColumn('safe_zones', 'corner_a_lng', 'corner_a_lng DOUBLE NULL')
+  await ensureColumn('safe_zones', 'corner_c_lat', 'corner_c_lat DOUBLE NULL')
+  await ensureColumn('safe_zones', 'corner_c_lng', 'corner_c_lng DOUBLE NULL')
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS geofence (
       id BIGINT AUTO_INCREMENT PRIMARY KEY,
       child_id VARCHAR(128) NOT NULL UNIQUE,
@@ -143,6 +206,100 @@ async function ensureSchema() {
   `)
 }
 
+async function listPollTargets() {
+  const [rows] = await pool.query(
+    `SELECT child_id, thing_id
+     FROM children
+     WHERE active = TRUE`,
+  )
+
+  const targets = []
+  if (Array.isArray(rows) && rows.length > 0) {
+    for (const row of rows) {
+      const childId = typeof row.child_id === 'string' ? row.child_id : ''
+      const thingId = typeof row.thing_id === 'string' && row.thing_id ? row.thing_id : childId
+      if (childId && thingId) targets.push({ childId, thingId })
+    }
+  }
+
+  if (targets.length > 0) return targets
+
+  const envChildIds = parseCsvIds(process.env.ARDUINO_CHILD_IDS || process.env.ARDUINO_CHILD_ID || '')
+  const envThingIds = parseCsvIds(process.env.ARDUINO_THING_IDS || process.env.ARDUINO_THING_ID || '')
+
+  const fallbackTargets = []
+  const max = Math.max(envChildIds.length, envThingIds.length)
+  for (let i = 0; i < max; i += 1) {
+    const childId = envChildIds[i] || envThingIds[i]
+    const thingId = envThingIds[i] || envChildIds[i]
+    if (childId && thingId) fallbackTargets.push({ childId, thingId })
+  }
+  return fallbackTargets
+}
+
+async function pickZoneStatusForChild(childId, lat, lng) {
+  const [rows] = await pool.query(
+    `SELECT id, zone_name, shape_type, center_lat, center_lng, radius_meters,
+            corner_a_lat, corner_a_lng, corner_c_lat, corner_c_lng
+     FROM safe_zones
+     WHERE child_id IN (?, ?) AND active = TRUE`,
+    [childId, GLOBAL_SAFEZONE_CHILD_ID],
+  )
+
+  if (Array.isArray(rows) && rows.length > 0) {
+    let insideAny = false
+    let minDistance = Number.POSITIVE_INFINITY
+    let matchedZone = null
+    for (const zone of rows) {
+      const shapeType = zone.shape_type === 'rectangle' ? 'rectangle' : 'circle'
+      let distance = haversineMeters(lat, lng, zone.center_lat, zone.center_lng)
+      let isInside = false
+      if (shapeType === 'rectangle'
+        && Number.isFinite(zone.corner_a_lat)
+        && Number.isFinite(zone.corner_a_lng)
+        && Number.isFinite(zone.corner_c_lat)
+        && Number.isFinite(zone.corner_c_lng)) {
+        const minLat = Math.min(zone.corner_a_lat, zone.corner_c_lat)
+        const maxLat = Math.max(zone.corner_a_lat, zone.corner_c_lat)
+        const minLng = Math.min(zone.corner_a_lng, zone.corner_c_lng)
+        const maxLng = Math.max(zone.corner_a_lng, zone.corner_c_lng)
+        isInside = lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng
+        distance = 0
+      } else {
+        isInside = distance <= zone.radius_meters
+      }
+      if (distance < minDistance) {
+        minDistance = distance
+        matchedZone = zone
+      }
+      if (isInside) {
+        insideAny = true
+      }
+    }
+    return {
+      geofenceViolated: !insideAny,
+      distanceFromCenterMeters: Number.isFinite(minDistance) ? minDistance : null,
+      matchedZoneName: matchedZone?.zone_name ?? null,
+    }
+  }
+
+  // Backward compatibility with old single-zone table.
+  const [legacyRows] = await pool.query(
+    'SELECT center_lat, center_lng, radius_meters FROM geofence WHERE child_id = ? LIMIT 1',
+    [childId],
+  )
+  if (!Array.isArray(legacyRows) || legacyRows.length === 0) {
+    return { geofenceViolated: false, distanceFromCenterMeters: null, matchedZoneName: null }
+  }
+  const geofence = legacyRows[0]
+  const distanceFromCenterMeters = haversineMeters(lat, lng, geofence.center_lat, geofence.center_lng)
+  return {
+    geofenceViolated: distanceFromCenterMeters > geofence.radius_meters,
+    distanceFromCenterMeters,
+    matchedZoneName: null,
+  }
+}
+
 app.get('/health', async (_req, res) => {
   await pool.query('SELECT 1')
   res.json({ ok: true, service: 'clms-node-backend' })
@@ -155,6 +312,222 @@ app.get('/api/webhooks/arduino/gps', (_req, res) => {
 
 app.head('/api/webhooks/arduino/gps', (_req, res) => {
   res.status(200).end()
+})
+
+app.get('/api/children', async (_req, res) => {
+  const [rows] = await pool.query(
+    `SELECT child_id AS childId, display_name AS displayName, thing_id AS thingId, active, created_at AS createdAt
+     FROM children
+     ORDER BY created_at ASC`,
+  )
+  return res.json(rows)
+})
+
+app.post('/api/children', async (req, res) => {
+  const { childId, displayName, thingId } = req.body ?? {}
+  if (!childId || typeof childId !== 'string') {
+    return res.status(400).json({ message: 'childId is required.' })
+  }
+  const safeDisplayName = typeof displayName === 'string' && displayName.trim()
+    ? displayName.trim()
+    : `Child ${childId.slice(0, 6)}`
+  const safeThingId = typeof thingId === 'string' && thingId.trim() ? thingId.trim() : childId
+
+  await pool.query(
+    `INSERT INTO children (child_id, display_name, thing_id, active)
+     VALUES (?, ?, ?, TRUE)
+     ON DUPLICATE KEY UPDATE
+       display_name = VALUES(display_name),
+       thing_id = VALUES(thing_id),
+       active = TRUE`,
+    [childId.trim(), safeDisplayName, safeThingId],
+  )
+  return res.status(201).json({ childId: childId.trim(), displayName: safeDisplayName, thingId: safeThingId })
+})
+
+app.patch('/api/children/:childId', async (req, res) => {
+  const { childId } = req.params
+  const { displayName, thingId, active } = req.body ?? {}
+  const fields = []
+  const values = []
+  if (typeof displayName === 'string' && displayName.trim()) {
+    fields.push('display_name = ?')
+    values.push(displayName.trim())
+  }
+  if (typeof thingId === 'string' && thingId.trim()) {
+    fields.push('thing_id = ?')
+    values.push(thingId.trim())
+  }
+  if (typeof active === 'boolean') {
+    fields.push('active = ?')
+    values.push(active)
+  }
+  if (fields.length === 0) {
+    return res.status(400).json({ message: 'No updatable fields.' })
+  }
+  values.push(childId)
+  await pool.query(`UPDATE children SET ${fields.join(', ')} WHERE child_id = ?`, values)
+  return res.json({ ok: true, childId })
+})
+
+app.get('/api/safezones/:childId', async (req, res) => {
+  const { childId } = req.params
+  const [rows] = await pool.query(
+    `SELECT id, child_id AS childId, zone_name AS zoneName, shape_type AS shapeType,
+            center_lat AS centerLat, center_lng AS centerLng, radius_meters AS radiusMeters,
+            corner_a_lat AS cornerALat, corner_a_lng AS cornerALng,
+            corner_c_lat AS cornerCLat, corner_c_lng AS cornerCLng,
+            active, created_at AS createdAt
+     FROM safe_zones
+     WHERE child_id IN (?, ?)
+     ORDER BY created_at DESC`,
+    [childId, GLOBAL_SAFEZONE_CHILD_ID],
+  )
+  return res.json(rows)
+})
+
+app.get('/api/safezones', async (_req, res) => {
+  const [rows] = await pool.query(
+    `SELECT id, child_id AS childId, zone_name AS zoneName, shape_type AS shapeType,
+            center_lat AS centerLat, center_lng AS centerLng, radius_meters AS radiusMeters,
+            corner_a_lat AS cornerALat, corner_a_lng AS cornerALng,
+            corner_c_lat AS cornerCLat, corner_c_lng AS cornerCLng,
+            active, created_at AS createdAt
+     FROM safe_zones
+     WHERE child_id = ?
+     ORDER BY created_at DESC`,
+    [GLOBAL_SAFEZONE_CHILD_ID],
+  )
+  return res.json(rows)
+})
+
+app.post('/api/safezones', async (req, res) => {
+  const {
+    childId,
+    zoneName,
+    shapeType,
+    centerLat,
+    centerLng,
+    edgeLat,
+    edgeLng,
+    radiusMeters,
+    cornerALat,
+    cornerALng,
+    cornerCLat,
+    cornerCLng,
+  } = req.body ?? {}
+  const effectiveChildId = typeof childId === 'string' && childId.trim()
+    ? childId.trim()
+    : GLOBAL_SAFEZONE_CHILD_ID
+  if (!zoneName || typeof zoneName !== 'string' || !zoneName.trim()) {
+    return res.status(400).json({ message: 'zoneName is required.' })
+  }
+  if (!Number.isFinite(centerLat) || !Number.isFinite(centerLng)) {
+    return res.status(400).json({ message: 'centerLat/centerLng must be numbers.' })
+  }
+  const normalizedShape = shapeType === 'rectangle' ? 'rectangle' : 'circle'
+  let computedRadius = Number(radiusMeters)
+  let safeCornerALat = null
+  let safeCornerALng = null
+  let safeCornerCLat = null
+  let safeCornerCLng = null
+
+  if (normalizedShape === 'rectangle') {
+    safeCornerALat = Number(cornerALat)
+    safeCornerALng = Number(cornerALng)
+    safeCornerCLat = Number(cornerCLat)
+    safeCornerCLng = Number(cornerCLng)
+    if (
+      !Number.isFinite(safeCornerALat)
+      || !Number.isFinite(safeCornerALng)
+      || !Number.isFinite(safeCornerCLat)
+      || !Number.isFinite(safeCornerCLng)
+    ) {
+      return res.status(400).json({ message: 'Rectangle requires cornerALat/cornerALng/cornerCLat/cornerCLng.' })
+    }
+    const latSpan = Math.abs(safeCornerALat - safeCornerCLat)
+    const lngSpan = Math.abs(safeCornerALng - safeCornerCLng)
+    if (latSpan < 0.00001 || lngSpan < 0.00001) {
+      return res.status(400).json({ message: 'Rectangle zone is too small.' })
+    }
+    const midLat = (safeCornerALat + safeCornerCLat) / 2
+    const midLng = (safeCornerALng + safeCornerCLng) / 2
+    computedRadius = haversineMeters(midLat, midLng, safeCornerALat, safeCornerALng)
+  } else if (!Number.isFinite(computedRadius) || computedRadius <= 0) {
+    if (!Number.isFinite(edgeLat) || !Number.isFinite(edgeLng)) {
+      return res.status(400).json({ message: 'Provide edgeLat/edgeLng or radiusMeters.' })
+    }
+    computedRadius = haversineMeters(centerLat, centerLng, edgeLat, edgeLng)
+  }
+  if (!Number.isFinite(computedRadius) || computedRadius < 10) {
+    return res.status(400).json({ message: 'radiusMeters is too small.' })
+  }
+
+  const [insertResult] = await pool.query(
+    `INSERT INTO safe_zones
+      (child_id, zone_name, shape_type, center_lat, center_lng, radius_meters,
+       corner_a_lat, corner_a_lng, corner_c_lat, corner_c_lng, active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
+    [
+      effectiveChildId,
+      zoneName.trim(),
+      normalizedShape,
+      centerLat,
+      centerLng,
+      computedRadius,
+      safeCornerALat,
+      safeCornerALng,
+      safeCornerCLat,
+      safeCornerCLng,
+    ],
+  )
+  return res.status(201).json({
+    id: insertResult.insertId,
+    childId: effectiveChildId,
+    zoneName: zoneName.trim(),
+    shapeType: normalizedShape,
+    centerLat,
+    centerLng,
+    radiusMeters: computedRadius,
+    cornerALat: safeCornerALat,
+    cornerALng: safeCornerALng,
+    cornerCLat: safeCornerCLat,
+    cornerCLng: safeCornerCLng,
+    active: true,
+  })
+})
+
+app.patch('/api/safezones/:zoneId', async (req, res) => {
+  const zoneId = Number(req.params.zoneId)
+  if (!Number.isFinite(zoneId) || zoneId <= 0) {
+    return res.status(400).json({ message: 'Invalid zoneId.' })
+  }
+  const { zoneName, active } = req.body ?? {}
+  const fields = []
+  const values = []
+  if (typeof zoneName === 'string' && zoneName.trim()) {
+    fields.push('zone_name = ?')
+    values.push(zoneName.trim())
+  }
+  if (typeof active === 'boolean') {
+    fields.push('active = ?')
+    values.push(active)
+  }
+  if (fields.length === 0) {
+    return res.status(400).json({ message: 'No updatable fields.' })
+  }
+  values.push(zoneId)
+  await pool.query(`UPDATE safe_zones SET ${fields.join(', ')} WHERE id = ?`, values)
+  return res.json({ ok: true, zoneId })
+})
+
+app.delete('/api/safezones/:zoneId', async (req, res) => {
+  const zoneId = Number(req.params.zoneId)
+  if (!Number.isFinite(zoneId) || zoneId <= 0) {
+    return res.status(400).json({ message: 'Invalid zoneId.' })
+  }
+  await pool.query('DELETE FROM safe_zones WHERE id = ?', [zoneId])
+  return res.json({ ok: true, zoneId })
 })
 
 app.post('/api/geofences', async (req, res) => {
@@ -175,6 +548,7 @@ app.post('/api/geofences', async (req, res) => {
 
   return res.json({
     childId,
+    zoneName: 'Legacy geofence',
     centerLat,
     centerLng,
     radiusMeters,
@@ -239,15 +613,11 @@ async function snapshotLatestToHistory() {
 }
 
 /** Pull Thing properties from Arduino IoT Cloud and upsert GPS (uses Gps JSON or lat/lng variables). */
-async function pollArduinoCloudGpsToDb() {
+async function pollArduinoCloudGpsToDb(target) {
   const clientId = process.env.ARDUINO_CLIENT_ID
   const clientSecret = process.env.ARDUINO_CLIENT_SECRET
-  const thingId =
-    (typeof process.env.ARDUINO_THING_ID === 'string' && process.env.ARDUINO_THING_ID) ||
-    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) ||
-    ''
-  const childId =
-    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) || thingId
+  const thingId = target?.thingId
+  const childId = target?.childId
 
   if (!clientId || !clientSecret || !thingId) {
     return
@@ -278,20 +648,24 @@ async function pollArduinoCloudGpsToDb() {
 function startArduinoCloudPollScheduler() {
   const clientId = process.env.ARDUINO_CLIENT_ID
   const clientSecret = process.env.ARDUINO_CLIENT_SECRET
-  const thingId =
-    (typeof process.env.ARDUINO_THING_ID === 'string' && process.env.ARDUINO_THING_ID) ||
-    (typeof process.env.ARDUINO_CHILD_ID === 'string' && process.env.ARDUINO_CHILD_ID) ||
-    ''
 
   const pollMs = Number(process.env.ARDUINO_POLL_INTERVAL_MS ?? 60_000)
-  if (!clientId || !clientSecret || !thingId || !Number.isFinite(pollMs) || pollMs <= 0) {
+  if (!clientId || !clientSecret || !Number.isFinite(pollMs) || pollMs <= 0) {
     return
   }
 
-  const run = () => {
-    pollArduinoCloudGpsToDb().catch((err) => {
-      console.error('[arduino poll]', err.message)
-    })
+  const run = async () => {
+    try {
+      const targets = await listPollTargets()
+      for (const target of targets) {
+        // eslint-disable-next-line no-await-in-loop
+        await pollArduinoCloudGpsToDb(target).catch((err) => {
+          console.error('[arduino poll]', target.childId, err.message)
+        })
+      }
+    } catch (err) {
+      console.error('[arduino poll] scheduler', err.message)
+    }
   }
 
   const bootDelay = Number(process.env.ARDUINO_POLL_BOOT_DELAY_MS ?? 5_000)
@@ -301,23 +675,21 @@ function startArduinoCloudPollScheduler() {
   setInterval(run, pollMs)
 
   const label = pollMs >= 60_000 ? `${Math.round(pollMs / 60_000)} min` : `${Math.round(pollMs / 1000)} s`
-  console.log(`Arduino Cloud GPS poll every ${label} (thing ${thingId})`)
+  console.log(`Arduino Cloud GPS poll every ${label} (targets from children table or env fallback)`)
 }
 
 async function upsertGpsLocation({ childId, lat, lng, timestamp }) {
-  const [geofenceRows] = await pool.query(
-    'SELECT center_lat, center_lng, radius_meters FROM geofence WHERE child_id = ? LIMIT 1',
-    [childId],
+  await pool.query(
+    `INSERT INTO children (child_id, display_name, thing_id, active)
+     VALUES (?, ?, ?, TRUE)
+     ON DUPLICATE KEY UPDATE
+       thing_id = COALESCE(thing_id, VALUES(thing_id))`,
+    [childId, `Child ${String(childId).slice(0, 6)}`, childId],
   )
 
-  let geofenceViolated = false
-  let distanceFromCenterMeters = null
-
-  if (Array.isArray(geofenceRows) && geofenceRows.length > 0) {
-    const geofence = geofenceRows[0]
-    distanceFromCenterMeters = haversineMeters(lat, lng, geofence.center_lat, geofence.center_lng)
-    geofenceViolated = distanceFromCenterMeters > geofence.radius_meters
-  }
+  const zoneStatus = await pickZoneStatusForChild(childId, lat, lng)
+  const geofenceViolated = zoneStatus.geofenceViolated
+  const distanceFromCenterMeters = zoneStatus.distanceFromCenterMeters
 
   const capturedAt = Math.trunc(timestamp)
 
@@ -348,6 +720,7 @@ async function upsertGpsLocation({ childId, lat, lng, timestamp }) {
     timestamp: capturedAt,
     geofenceViolated,
     distanceFromCenterMeters,
+    zoneName: zoneStatus.matchedZoneName,
   }
 }
 
@@ -639,6 +1012,27 @@ app.get('/api/location/latest/:childId', async (req, res) => {
     return res.status(404).json({ message: 'No location found for child.' })
   }
   return res.json(rows[0])
+})
+
+app.get('/api/location/latest', async (req, res) => {
+  const idsRaw = typeof req.query.childIds === 'string' ? req.query.childIds : ''
+  const childIds = idsRaw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (childIds.length === 0) {
+    return res.status(400).json({ message: 'Query childIds is required (comma-separated).' })
+  }
+  const placeholders = childIds.map(() => '?').join(',')
+  const [rows] = await pool.query(
+    `SELECT child_id AS childId, lat, lng, captured_at AS timestamp,
+            geofence_violated AS geofenceViolated,
+            distance_from_center_meters AS distanceFromCenterMeters
+     FROM child_latest_location
+     WHERE child_id IN (${placeholders})`,
+    childIds,
+  )
+  return res.json(rows)
 })
 
 app.get('/api/location/history/:childId', async (req, res) => {

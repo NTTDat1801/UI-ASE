@@ -50,14 +50,20 @@ export default function SideNav({ active }) {
   return (
     <div style={{
       width: '220px',
+      minWidth: '220px',
+      maxWidth: '220px',
       height: '100vh',
       background: '#fff',
       borderRight: '2px solid var(--border)',
       display: 'flex',
       flexDirection: 'column',
       flexShrink: 0,
-      position: 'sticky',
+      position: 'fixed',
+      left: 0,
       top: 0,
+      zIndex: 2147483647,
+      pointerEvents: 'auto',
+      userSelect: 'none',
     }}>
       {/* Logo */}
       <div style={{
